@@ -38,13 +38,19 @@ import socket
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
+from flask import Flask, jsonify, render_template_string, request
 import requests
-from flask import Flask, jsonify, request, render_template_string
 
 try:
-    from zeroconf import ServiceInfo, ServiceBrowser, ServiceListener, Zeroconf
+    from zeroconf import (
+        ServiceBrowser,
+        ServiceInfo,
+        ServiceListener,
+        Zeroconf,
+    )
+
     ZEROCONF_AVAILABLE = True
 except ImportError:
     ZEROCONF_AVAILABLE = False
@@ -53,23 +59,25 @@ app = Flask(__name__)
 
 MDNS_SERVICE_TYPE = "_meshchat._tcp.local."
 
-# --- Estado del nodo (se completa en __main__) ---
+# --- Estado global del nodo ---
 NODE_ID = None
 PUBLIC_URL = None
-DIRECTORY_URL = None      # opcional
-BOOTSTRAP_PEER = None      # opcional
+DIRECTORY_URL = None
+BOOTSTRAP_PEER = None
 
-PEERS = {}            # {node_id: url} -- descubiertos por directorio y/o PEX
-PEER_FAILURES = {}     # {node_id: intentos_fallidos_consecutivos}
-MESSAGES = []          # historial de chat: [{id, from, content, time}]
-SEEN_IDS = set()       # para evitar reenviar/mostrar el mismo mensaje dos veces
+PEERS = {}  # {node_id: url}
+PEER_FAILURES = {}  # {node_id: intentos_fallidos}
+MESSAGES = []  # [{id, from, content, time}]
+SEEN_IDS = set()  # IDs de mensajes procesados
 
+# Locks para asegurar Thread-Safety
 PEERS_LOCK = threading.Lock()
+DATA_LOCK = threading.Lock()
 
-HEARTBEAT_INTERVAL = 20   # segundos entre anuncios al directorio
-PEX_INTERVAL = 15         # segundos entre rondas de peer exchange
-PEX_SAMPLE_SIZE = 3       # a cuántos peers preguntarles por sus peers en cada ronda
-MAX_FAILURES = 3          # tras cuántos fallos consecutivos se descarta un peer
+HEARTBEAT_INTERVAL = 20  # segundos entre anuncios al directorio
+PEX_INTERVAL = 15  # segundos entre rondas de peer exchange
+PEX_SAMPLE_SIZE = 3  # muestra de peers a consultar en PEX
+MAX_FAILURES = 3  # fallos para descartar a un peer
 
 
 CHAT_HTML = """
@@ -102,7 +110,7 @@ CHAT_HTML = """
       const res = await fetch('/messages');
       const data = await res.json();
       const box = document.getElementById('messages');
-      box.innerHTML = data.messages.map(m =>
+      box.innerHTML = data.messages.map(m => 
         `<div class="msg"><span class="from">${m.from}:</span> ${m.content} <span class="time">${m.time}</span></div>`
       ).join('');
       box.scrollTop = box.scrollHeight;
@@ -110,7 +118,7 @@ CHAT_HTML = """
       const peersRes = await fetch('/peers');
       const peersData = await peersRes.json();
       const names = Object.keys(peersData.peers).filter(n => n !== "{{ node_id }}");
-      document.getElementById('peers').innerText =
+      document.getElementById('peers').innerText = 
         'Peers conocidos: ' + (names.join(', ') || '(ninguno todavía)');
     }
 
@@ -149,11 +157,6 @@ def health():
 
 @app.route("/peers", methods=["GET"])
 def get_peers():
-    """
-    Endpoint clave para Peer Exchange: cualquier nodo puede preguntarle a
-    este nodo quiénes conoce, y este nodo se incluye a sí mismo en la
-    respuesta, para que quien pregunta también pueda conectarse a él.
-    """
     with PEERS_LOCK:
         peers_with_self = dict(PEERS)
     peers_with_self[NODE_ID] = PUBLIC_URL
@@ -162,11 +165,12 @@ def get_peers():
 
 @app.route("/messages", methods=["GET"])
 def get_messages():
-    return jsonify({"messages": MESSAGES})
+    with DATA_LOCK:
+        msgs = list(MESSAGES)
+    return jsonify({"messages": msgs})
 
 
 def _merge_peer(node_id, url):
-    """Agrega un peer nuevo a la lista local (si no es uno mismo)."""
     if node_id == NODE_ID or not url:
         return
     with PEERS_LOCK:
@@ -177,7 +181,6 @@ def _merge_peer(node_id, url):
 
 
 def _mark_peer_result(node_id, success):
-    """Lleva la cuenta de fallos por peer y descarta a los que ya no responden."""
     with PEERS_LOCK:
         if node_id not in PEERS:
             return
@@ -191,14 +194,8 @@ def _mark_peer_result(node_id, success):
                 del PEER_FAILURES[node_id]
 
 
-def _store_and_relay(msg):
-    """Guarda un mensaje si es nuevo y lo reenvía (gossip) a los peers."""
-    if msg["id"] in SEEN_IDS:
-        return False  # ya lo habíamos visto, no lo repetimos
-
-    SEEN_IDS.add(msg["id"])
-    MESSAGES.append(msg)
-
+def _relay_to_peers(msg):
+    """Ejecuta el envío HTTP a peers en un hilo en segundo plano (asíncrono)."""
     with PEERS_LOCK:
         targets = list(PEERS.items())
 
@@ -209,18 +206,32 @@ def _store_and_relay(msg):
         except requests.exceptions.RequestException:
             _mark_peer_result(peer_id, success=False)
 
+
+def _store_and_relay(msg):
+    """Guarda localmente el mensaje y dispara la retransmisión Gossip."""
+    with DATA_LOCK:
+        if msg["id"] in SEEN_IDS:
+            return False
+        SEEN_IDS.add(msg["id"])
+        MESSAGES.append(msg)
+
+    # Disparar Gossip en un hilo secundario para no bloquear la petición HTTP actual
+    threading.Thread(
+        target=_relay_to_peers, args=(msg,), daemon=True
+    ).start()
     return True
 
 
 @app.route("/receive", methods=["POST"])
 def receive():
-    """Recibe un mensaje gossip de otro nodo."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     msg = {
         "id": data.get("id", str(uuid.uuid4())),
         "from": data.get("from", "desconocido"),
         "content": data.get("content", ""),
-        "time": data.get("time", datetime.utcnow().strftime("%H:%M:%S"))
+        "time": data.get(
+            "time", datetime.now(timezone.utc).strftime("%H:%M:%S")
+        ),
     }
     _store_and_relay(msg)
     return jsonify({"ok": True})
@@ -228,53 +239,56 @@ def receive():
 
 @app.route("/send", methods=["POST"])
 def send():
-    """El usuario de este nodo escribe un mensaje nuevo en el chat."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     msg = {
         "id": str(uuid.uuid4()),
         "from": NODE_ID,
         "content": data.get("content", ""),
-        "time": datetime.utcnow().strftime("%H:%M:%S")
+        "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
     }
     _store_and_relay(msg)
     return jsonify({"ok": True, "message": msg})
 
 
 def bootstrap_from_directory():
-    """Anuncio inicial + periódico ante el directorio central (si se usa)."""
     try:
-        requests.post(f"{DIRECTORY_URL}/announce",
-                       json={"node_id": NODE_ID, "url": PUBLIC_URL}, timeout=5)
-        resp = requests.get(f"{DIRECTORY_URL}/nodes",
-                             params={"exclude": NODE_ID}, timeout=5)
+        requests.post(
+            f"{DIRECTORY_URL}/announce",
+            json={"node_id": NODE_ID, "url": PUBLIC_URL},
+            timeout=5,
+        )
+        resp = requests.get(
+            f"{DIRECTORY_URL}/nodes",
+            params={"exclude": NODE_ID},
+            timeout=5,
+        )
         if resp.ok:
             for nid, url in resp.json().get("nodes", {}).items():
                 _merge_peer(nid, url)
     except requests.exceptions.RequestException as e:
-        print(f"[{NODE_ID}] No se pudo contactar al directorio: {e}")
+        print(f"[{NODE_ID}] Error contactando directorio: {e}")
 
 
 def bootstrap_from_peer():
-    """Entra a la red preguntándole directamente a un solo peer conocido."""
     try:
         resp = requests.get(f"{BOOTSTRAP_PEER}/peers", timeout=5)
         if resp.ok:
             for nid, url in resp.json().get("peers", {}).items():
                 _merge_peer(nid, url)
-            print(f"[{NODE_ID}] Bootstrap exitoso via peer, {len(PEERS)} peers conocidos")
+            print(
+                f"[{NODE_ID}] Bootstrap via peer exitoso ({len(PEERS)} peers conocidos)"
+            )
     except requests.exceptions.RequestException as e:
-        print(f"[{NODE_ID}] No se pudo contactar al peer de bootstrap: {e}")
+        print(f"[{NODE_ID}] Error en bootstrap via peer: {e}")
 
 
 def directory_heartbeat_loop():
-    """Solo corre si se proporcionó --directory. Reanuncia periódicamente."""
     while True:
         bootstrap_from_directory()
         time.sleep(HEARTBEAT_INTERVAL)
 
 
 def get_local_ip():
-    """Obtiene la IP local del equipo dentro de su red (no la pública)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -285,8 +299,9 @@ def get_local_ip():
         s.close()
 
 
-class _MeshDiscoveryListener(ServiceListener if ZEROCONF_AVAILABLE else object):
-    """Escucha anuncios mDNS de otros nodos en la misma red local."""
+class _MeshDiscoveryListener(
+    ServiceListener if ZEROCONF_AVAILABLE else object
+):
 
     def add_service(self, zc, service_type, name):
         self._handle(zc, service_type, name)
@@ -295,7 +310,7 @@ class _MeshDiscoveryListener(ServiceListener if ZEROCONF_AVAILABLE else object):
         self._handle(zc, service_type, name)
 
     def remove_service(self, zc, service_type, name):
-        pass  # dejamos que el contador de fallos limpie peers muertos
+        pass
 
     def _handle(self, zc, service_type, name):
         info = zc.get_service_info(service_type, name)
@@ -303,23 +318,15 @@ class _MeshDiscoveryListener(ServiceListener if ZEROCONF_AVAILABLE else object):
             return
         node_id = info.properties.get(b"node_id", b"").decode("utf-8")
         if not node_id or node_id == NODE_ID:
-            return  # es uno mismo, ignorar
+            return
         ip = socket.inet_ntoa(info.addresses[0])
         url = f"http://{ip}:{info.port}"
         _merge_peer(node_id, url)
-        print(f"[{NODE_ID}] Peer descubierto por mDNS (LAN): {node_id} ({url})")
 
 
 def start_mdns_discovery(port):
-    """
-    Registra este nodo en la red local vía mDNS y escucha anuncios de otros.
-    Solo funciona entre dispositivos en la MISMA red local (WiFi/LAN) --
-    no cruza a través de internet. Es discovery cien por ciento automático:
-    cero configuración, cero URLs que compartir a mano.
-    """
     if not ZEROCONF_AVAILABLE:
-        print(f"[{NODE_ID}] zeroconf no está instalado -- mDNS deshabilitado. "
-              f"Instálalo con: pip install zeroconf --break-system-packages")
+        print(f"[{NODE_ID}] zeroconf no instalado -- mDNS deshabilitado.")
         return None
 
     local_ip = get_local_ip()
@@ -334,18 +341,13 @@ def start_mdns_discovery(port):
     zc = Zeroconf()
     zc.register_service(info)
     ServiceBrowser(zc, MDNS_SERVICE_TYPE, _MeshDiscoveryListener())
-
-    print(f"[{NODE_ID}] mDNS activo -- anunciándose en la LAN como {local_ip}:{port}")
+    print(
+        f"[{NODE_ID}] mDNS activo -- anunciándose en la LAN ({local_ip}:{port})"
+    )
     return zc
 
 
 def pex_loop():
-    """
-    Peer Exchange: cada cierto tiempo, le pregunta a una muestra aleatoria
-    de los peers actuales quiénes más conocen ELLOS, y fusiona lo nuevo.
-    Esto es lo que permite que la red siga creciendo/sanando sin depender
-    de que el directorio central siga vivo.
-    """
     while True:
         time.sleep(PEX_INTERVAL)
 
@@ -366,27 +368,48 @@ def pex_loop():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Nodo de chat grupal mesh con PEX")
+    parser = argparse.ArgumentParser(
+        description="Nodo de chat grupal mesh con PEX"
+    )
     parser.add_argument("--port", type=int, default=5000, help="Puerto local")
-    parser.add_argument("--id", type=str, required=True, help="Tu nombre/id en el chat")
-    parser.add_argument("--public-url", type=str, required=True,
-                         help="Tu URL pública actual (la que te dio localhost.run/ngrok)")
-    parser.add_argument("--directory", type=str, default=None,
-                         help="URL del directorio central (opcional)")
-    parser.add_argument("--bootstrap-peer", type=str, default=None,
-                         help="URL de un peer ya activo, para entrar sin directorio (opcional)")
-    parser.add_argument("--no-lan", action="store_true",
-                         help="Desactiva el descubrimiento automático por mDNS en la red local")
+    parser.add_argument(
+        "--id", type=str, required=True, help="Tu nombre/id en el chat"
+    )
+    parser.add_argument(
+        "--public-url",
+        type=str,
+        default=None,
+        help="Tu URL pública (ej. ngrok). Si no se indica, usa la IP local.",
+    )
+    parser.add_argument(
+        "--directory",
+        type=str,
+        default=None,
+        help="URL del directorio central",
+    )
+    parser.add_argument(
+        "--bootstrap-peer",
+        type=str,
+        default=None,
+        help="URL de un peer ya activo",
+    )
+    parser.add_argument(
+        "--no-lan",
+        action="store_true",
+        help="Desactiva mDNS en la red local",
+    )
     args = parser.parse_args()
 
-    if not args.directory and not args.bootstrap_peer and args.no_lan:
-        parser.error("Sin --directory ni --bootstrap-peer, necesitas dejar mDNS activo "
-                      "(no uses --no-lan) para poder descubrir peers de alguna forma")
-
     NODE_ID = args.id
-    PUBLIC_URL = args.public_url.rstrip("/")
+    PUBLIC_URL = (
+        args.public_url.rstrip("/")
+        if args.public_url
+        else f"http://{get_local_ip()}:{args.port}"
+    )
     DIRECTORY_URL = args.directory.rstrip("/") if args.directory else None
-    BOOTSTRAP_PEER = args.bootstrap_peer.rstrip("/") if args.bootstrap_peer else None
+    BOOTSTRAP_PEER = (
+        args.bootstrap_peer.rstrip("/") if args.bootstrap_peer else None
+    )
 
     if BOOTSTRAP_PEER:
         bootstrap_from_peer()
@@ -400,13 +423,8 @@ if __name__ == "__main__":
 
     threading.Thread(target=pex_loop, daemon=True).start()
 
-    print(f"Nodo '{NODE_ID}' iniciado en puerto {args.port}")
-    print(f"Interfaz de chat: http://localhost:{args.port}")
-    if DIRECTORY_URL:
-        print(f"Directorio: {DIRECTORY_URL} (heartbeat cada {HEARTBEAT_INTERVAL}s)")
-    if BOOTSTRAP_PEER:
-        print(f"Bootstrap inicial via peer: {BOOTSTRAP_PEER}")
-    print(f"Peer Exchange activo cada {PEX_INTERVAL}s")
+    print(f"--- Nodo '{NODE_ID}' en ejecución ---")
+    print(f"Acceso Web: http://localhost:{args.port}")
 
     try:
         app.run(host="0.0.0.0", port=args.port, debug=False)

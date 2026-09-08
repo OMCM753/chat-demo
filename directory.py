@@ -16,79 +16,93 @@ Uso:
 """
 
 import argparse
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# {node_id: {"url": str, "last_seen": float}}
+# Estado central: {node_id: {"url": str, "last_seen": float}}
 NODES = {}
+NODES_LOCK = threading.Lock()
 
-# Un nodo se considera "muerto" si no se anuncia en este tiempo (segundos)
+# Tiempo (en segundos) tras el cual un nodo sin heartbeat se descarta
 NODE_TIMEOUT = 60
 
 
 def cleanup_stale_nodes():
-    """Elimina nodos que no se han anunciado recientemente."""
+    """Elimina del directorio los nodos que no hayan enviado heartbeat."""
     now = time.time()
-    stale = [nid for nid, info in NODES.items() if now - info["last_seen"] > NODE_TIMEOUT]
-    for nid in stale:
-        del NODES[nid]
+    with NODES_LOCK:
+        stale = [
+            nid
+            for nid, info in NODES.items()
+            if now - info["last_seen"] > NODE_TIMEOUT
+        ]
+        for nid in stale:
+            del NODES[nid]
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
+    return jsonify(
+        {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+    )
 
 
 @app.route("/announce", methods=["POST"])
 def announce():
-    """
-    Un nodo llama esto periódicamente (heartbeat) para anunciarse.
-
-    Body JSON esperado:
-    {
-        "node_id": "usuario123",
-        "url": "https://xxxx.lhr.life"
-    }
-    """
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     node_id = data.get("node_id")
     url = data.get("url")
 
     if not node_id or not url:
         return jsonify({"error": "Se requieren 'node_id' y 'url'"}), 400
 
-    NODES[node_id] = {"url": url.rstrip("/"), "last_seen": time.time()}
     cleanup_stale_nodes()
 
-    return jsonify({"message": "Anunciado correctamente", "active_nodes": len(NODES)})
+    with NODES_LOCK:
+        NODES[node_id] = {"url": url.rstrip("/"), "last_seen": time.time()}
+        active_count = len(NODES)
+
+    return jsonify(
+        {"message": "Anunciado correctamente", "active_nodes": active_count}
+    )
 
 
 @app.route("/nodes", methods=["GET"])
 def list_nodes():
-    """Devuelve la lista de nodos activos (excluyendo al que pregunta, si se indica)."""
     cleanup_stale_nodes()
     exclude = request.args.get("exclude")
-    nodes = {nid: info["url"] for nid, info in NODES.items() if nid != exclude}
+
+    with NODES_LOCK:
+        nodes = {
+            nid: info["url"] for nid, info in NODES.items() if nid != exclude
+        }
+
     return jsonify({"nodes": nodes, "count": len(nodes)})
 
 
 @app.route("/leave", methods=["POST"])
 def leave():
-    """Un nodo puede avisar explícitamente que se desconecta (opcional)."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     node_id = data.get("node_id")
-    if node_id in NODES:
-        del NODES[node_id]
+
+    with NODES_LOCK:
+        if node_id in NODES:
+            del NODES[node_id]
+
     return jsonify({"message": "Nodo removido"})
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Directorio central de la red mesh")
+    parser = argparse.ArgumentParser(
+        description="Directorio central de la red mesh"
+    )
     parser.add_argument("--port", type=int, default=6000)
     args = parser.parse_args()
+
     print(f"Directorio corriendo en puerto {args.port}")
-    app.run(host="0.0.0.0", port=args.port, debug=True)
+    app.run(host="0.0.0.0", port=args.port, debug=False)
