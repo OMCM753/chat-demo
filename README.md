@@ -18,9 +18,11 @@ Current build using:
 - zeroconf
 In order to not make every new user create an ngrok account just for the auth
 ---
-Propósito del proyecto: El proyecto va a tratar de un sistema de chat distribuido(Chatroom),cuatro nodos se van a repartir las cargas de forma  igual evitando que si alguno de estos nodos llegue a fallar el servicio deje de funcionar, para lograrlo los nodos replicaran el mensajes entre sí.
+##Propósito del proyecto: 
 
-Preguntas a responder:
+El proyecto va a tratar de un sistema de chat distribuido(Chatroom) donde cuatro nodos se van a repartir las cargas de forma igual evitando que si alguno de estos nodos llegue a fallar el servicio deje de funcionar, para lograr esto los nodos replicaran el mensajes entre sí.
+
+##Preguntas a responder:
 
 -¿Cuantos nodos tendrá el sistema?
 Nuestro proyecto contará con 4 nodos funcionales
