@@ -47,3 +47,18 @@ Python versión instalada:
 Diagrama:
 
 <img width="355" height="734" alt="diagrama" src="https://github.com/user-attachments/assets/f9dd8c81-0f5a-465f-8726-74563f510589" />
+
+
+
+
+
+---
+
+-Testing de postman:
+
+<img width="701" height="654" alt="WhatsApp Image 2026-09-15 at 6 37 54 PM" src="https://github.com/user-attachments/assets/1d4c8ed1-25bc-49e8-9756-48d52a6ea8c8" />
+<img width="701" height="654" alt="WhatsApp Image 2026-09-15 at 6 37 54 PM (1)" src="https://github.com/user-attachments/assets/b1b061e3-9c88-4a63-ab37-994c52ad9ec1" />
+<img width="701" height="551" alt="WhatsApp Image 2026-09-15 at 6 37 55 PM" src="https://github.com/user-attachments/assets/6a230f82-14c6-4d9c-9064-42ef94636479" />
+<img width="701" height="551" alt="WhatsApp Image 2026-09-15 at 6 37 55 PM (2)" src="https://github.com/user-attachments/assets/b00a02b3-2ae7-4eb5-beaa-6732fac3fba6" />
+<img width="701" height="551" alt="WhatsApp Image 2026-09-15 at 6 37 55 PM (1)" src="https://github.com/user-attachments/assets/e6b30bbe-808c-4a01-bb6b-6bdc281c0ad4" />
+
