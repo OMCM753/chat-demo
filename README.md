@@ -45,3 +45,5 @@ Python versión instalada:
 
 ---
 Diagrama:
+
+<img width="355" height="734" alt="diagrama" src="https://github.com/user-attachments/assets/f9dd8c81-0f5a-465f-8726-74563f510589" />
