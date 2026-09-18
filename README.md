@@ -62,3 +62,9 @@ Diagrama:
 <img width="701" height="551" alt="WhatsApp Image 2026-09-15 at 6 37 55 PM (2)" src="https://github.com/user-attachments/assets/b00a02b3-2ae7-4eb5-beaa-6732fac3fba6" />
 <img width="701" height="551" alt="WhatsApp Image 2026-09-15 at 6 37 55 PM (1)" src="https://github.com/user-attachments/assets/e6b30bbe-808c-4a01-bb6b-6bdc281c0ad4" />
 
+
+---
+
+-NODOS CONECTADOS:
+
+<img width="1600" height="970" alt="aw" src="https://github.com/user-attachments/assets/f342cfad-7130-48e8-8cb2-5e4c7fec15b3" />
